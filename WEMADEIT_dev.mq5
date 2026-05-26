@@ -10,6 +10,7 @@
 #include <Trade\Trade.mqh>
 #include <Files\FileTxt.mqh>
 #include "GoldMonitor.mqh"
+#include "ProfitMaximizer.mqh"
 
 //--- Input Parameters
 input double RiskPercent = 1.0;              // Risk per trade (%) (gold: 1.0)
@@ -164,6 +165,8 @@ int OnInit() {
       MonitorLog(MON_SEV_WARN, "INIT", "Gold Mode enabled but symbol is not XAU*: " + _Symbol);
    }
 
+   EventSetTimer(30); // 30-second timer for heartbeat + label refresh
+
    return(INIT_SUCCEEDED);
 }
 
@@ -171,7 +174,17 @@ int OnInit() {
 //| Expert deinitialization function                                 |
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason) {
+   MonitorSaveState();
+   ObjectDelete(0, "Monitor_Label");
+   EventKillTimer();
    Print("ICT Algorithmic Trading System Deinitialized");
+}
+
+void OnTimer() {
+   if(g_mon_initialized) {
+      MonitorDrawLabel();
+      g_telegram.Tick();
+   }
 }
 
 //+------------------------------------------------------------------+
@@ -207,10 +220,16 @@ double GetRSI(int period, ENUM_TIMEFRAMES tf, int shift=1) {
    return buffer[0];
 }
 
-// Calculate adaptive risk based on LRLR/HRLR
+// Calculate adaptive risk based on market regime
 double CalculateAdaptiveRisk() {
    if(!EnableLRLRDetection) return RiskPercent;
-   return isLRLR ? RiskPercent * 1.2 : RiskPercent * 0.8;
+   // Use ProfitMaximizer regime-based optimization
+   double opt_risk = RiskPercent;
+   double opt_atr = 1.0;
+   double opt_tp = RR_Ratio;
+   OptimizeForMarketRegime(g_current_market_regime, RiskPercent, 1.0, RR_Ratio,
+      10.0, 15.0, opt_risk, opt_atr, opt_tp, 0.0, false);
+   return MathMax(0.1, MathMin(opt_risk, RiskPercent * 1.2));
 }
 
 // Calculate lot size based on risk (uses adaptive risk)
@@ -242,8 +261,12 @@ double GetOverlapRatio() {
 
 void DetectMarketCondition() {
    if(!EnableLRLRDetection) { isLRLR=true; return; }
+   // Use ProfitMaximizer ADX+ATR regime detection
+   g_current_market_regime = DetectMarketRegime(_Symbol, TimeFrame, HTF, 14);
+   MonitorLog(MON_SEV_INFO, "REGIME", "Market regime: " + GetRegimeString(g_current_market_regime));
+
+   // Keep isLRLR for backward compat (LRLR = ranging, HRLR = trending)
    double ratio = GetOverlapRatio();
-   // Lower overlap => LRLR
    isLRLR = (ratio < 0.7);
 }
 
@@ -762,17 +785,72 @@ void ManagePositions() {
       datetime ot = (datetime)PositionGetInteger(POSITION_TIME);
       int barsOpen = BarsSince(ot);
       double current_price = (type == POSITION_TYPE_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_BID) : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-      double profit_pips = (type == POSITION_TYPE_BUY) ? (current_price - entry) / _Point : (entry - current_price) / _Point;
-      if(barsOpen >= MinHoldBars && profit_pips >= BreakevenPips) {
-         double new_sl = entry;
-         if((type == POSITION_TYPE_BUY && new_sl > sl) || (type == POSITION_TYPE_SELL && new_sl < sl)) {
+      double profit_distance = (type == POSITION_TYPE_BUY) ? (current_price - entry) : (entry - current_price);
+
+      // Multi-stage trailing from ProfitMaximizer
+      if(barsOpen >= MinHoldBars && profit_distance > 0) {
+         double new_sl = CalculateMultiStageTrailing(
+            (ENUM_POSITION_TYPE)type, entry, current_price, sl,
+            profit_distance, BreakevenPips,
+            g_current_market_regime, 0.0, _Point, (int)Digits(), false);
+
+         if((type == POSITION_TYPE_BUY && new_sl > sl) ||
+            (type == POSITION_TYPE_SELL && new_sl < sl)) {
             MqlTradeRequest req; MqlTradeResult res; ZeroMemory(req); ZeroMemory(res);
-            req.action = TRADE_ACTION_SLTP; req.symbol = _Symbol; req.position = ticket; req.sl = new_sl; req.tp = tp; req.magic = MagicNumber;
-            if(OrderSend(req, res)) { Print("Moved SL to breakeven for ticket ", ticket); }
+            req.action = TRADE_ACTION_SLTP; req.symbol = _Symbol; req.position = ticket;
+            req.sl = new_sl; req.tp = tp; req.magic = MagicNumber;
+            if(OrderSend(req, res)) {
+               MonitorLog(MON_SEV_INFO, "TRAIL", "Trailed SL for ticket " +
+                  IntegerToString(ticket) + " to " + DoubleToString(new_sl, 2));
+            }
          }
       }
    }
    ManagePartialProfits();
+   ExitStagnantTrades();
+}
+
+//+------------------------------------------------------------------+
+//| Close stagnant trades that haven't moved >= 0.3R after N bars     |
+//+------------------------------------------------------------------+
+void ExitStagnantTrades()
+{
+   for(int i = PositionsTotal() - 1; i >= 0; i--) {
+      ulong ticket = PositionGetTicket(i);
+      if(!PositionSelectByTicket(ticket)) continue;
+      if(PositionGetInteger(POSITION_MAGIC) != MagicNumber) continue;
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+
+      double entry = PositionGetDouble(POSITION_PRICE_OPEN);
+      double sl = PositionGetDouble(POSITION_SL);
+      long type = PositionGetInteger(POSITION_TYPE);
+      datetime ot = (datetime)PositionGetInteger(POSITION_TIME);
+
+      int bars_open = (int)((TimeCurrent() - ot) / PeriodSeconds(PERIOD_H1));
+      if(bars_open < 48) continue; // min 48h before stagnant check
+
+      double current_price = (type == POSITION_TYPE_BUY)
+         ? SymbolInfoDouble(_Symbol, SYMBOL_BID)
+         : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+      double oneR = (sl != 0) ? MathAbs(entry - sl) : GetATR(14, TimeFrame, 1);
+      double profit_distance = (type == POSITION_TYPE_BUY)
+         ? (current_price - entry)
+         : (entry - current_price);
+
+      // If hasn't moved at least 0.3R after 48h → close
+      if(oneR > 0 && profit_distance < oneR * 0.3) {
+         MqlTradeRequest req; MqlTradeResult res; ZeroMemory(req); ZeroMemory(res);
+         req.action = TRADE_ACTION_DEAL; req.symbol = _Symbol;
+         req.volume = PositionGetDouble(POSITION_VOLUME); req.position = ticket;
+         req.type = (type == POSITION_TYPE_BUY) ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
+         req.price = current_price; req.deviation = Slippage; req.magic = MagicNumber;
+         req.comment = "StagnantExit";
+         if(OrderSend(req, res)) {
+            MonitorLog(MON_SEV_WARN, "STAGNANT", "Closed stagnant trade " +
+               IntegerToString(ticket) + " open " + IntegerToString(bars_open) + "h");
+         }
+      }
+   }
 }
 
 //+------------------------------------------------------------------+
@@ -847,7 +925,7 @@ void OnNewBar() {
          last_trade_time = TimeCurrent(); partial_taken = false; last_trade_dir = 1;
          MonitorLog(MON_SEV_INFO, "ENTRY", "BUY Entry=" + DoubleToString(entryPx, 2)
             + " SL=" + DoubleToString(stopLoss, 2) + " TP=" + DoubleToString(takeProfit, 2)
-            + " Lot=" + DoubleToString(lotSize, 2) + " LRLR=" + (isLRLR ? "1" : "0")
+            + " Lot=" + DoubleToString(lotSize, 2) + " Regime=" + GetRegimeString(g_current_market_regime)
             + " ATR=" + DoubleToString(atr, 2));
          MonitorNotifyEntry(_Symbol, "BUY", entryPx, stopLoss, takeProfit, lotSize, atr, "ICT_ADV");
       } else {
@@ -889,7 +967,7 @@ void OnNewBar() {
          last_trade_time = TimeCurrent(); partial_taken = false; last_trade_dir = -1;
          MonitorLog(MON_SEV_INFO, "ENTRY", "SELL Entry=" + DoubleToString(entryPx, 2)
             + " SL=" + DoubleToString(stopLoss, 2) + " TP=" + DoubleToString(takeProfit, 2)
-            + " Lot=" + DoubleToString(lotSize, 2) + " LRLR=" + (isLRLR ? "1" : "0")
+            + " Lot=" + DoubleToString(lotSize, 2) + " Regime=" + GetRegimeString(g_current_market_regime)
             + " ATR=" + DoubleToString(atr, 2));
          MonitorNotifyEntry(_Symbol, "SELL", entryPx, stopLoss, takeProfit, lotSize, atr, "ICT_ADV");
       } else {
@@ -941,7 +1019,9 @@ void TrackClosedTrades() {
    double entry_sl = HistoryDealGetDouble(ticket, DEAL_SL);
    double one_r = (entry_sl != 0) ? MathAbs(entry_price - entry_sl) : MathAbs(profit) / 0.5;
    double rr = (one_r > 0) ? MathAbs(profit) / one_r : 0;
-   MonitorNotifyExit(profit, rr, (profit >= 0) ? "TP/Hit" : "SL/Hit");
+   string reason = ((profit >= 0) ? "TP/Hit" : "SL/Hit")
+      + " | Regime: " + GetRegimeString(g_current_market_regime);
+   MonitorNotifyExit(profit, rr, reason);
 }
 
 //+------------------------------------------------------------------+

@@ -203,7 +203,7 @@ double CalculateMultiStageTrailing(ENUM_POSITION_TYPE position_type,
                            double open_price, double current_price, 
                            double current_sl, double profit_distance,
                            double trailing_step, ENUM_MARKET_REGIME market_regime, 
-                           double market_sentiment, int point, int digits,
+                           double market_sentiment, double point, int digits,
                            bool verbose_mode)
 {
    double new_sl = current_sl;
@@ -280,6 +280,13 @@ double CalculateMultiStageTrailing(ENUM_POSITION_TYPE position_type,
    
    return new_sl;
 }
+
+// Forward declaration for backward compat
+struct TradeResult {
+   datetime          time;
+   bool              is_win;
+   ENUM_POSITION_TYPE direction;
+};
 
 //+------------------------------------------------------------------+
 //| Analyze trading patterns for directional bias                     |

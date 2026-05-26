@@ -81,6 +81,14 @@ datetime          g_mon_last_tp_hit;
 datetime          g_mon_last_sl_hit;
 double            g_mon_peak_balance;
 double            g_mon_initial_balance;
+datetime          g_mon_last_heartbeat;
+int               g_mon_start_time;
+int               g_mon_last_summary_day;
+int               g_mon_label_refresh;
+int               g_mon_trade_count_total;
+
+// Persistent state filename
+#define MON_STATE_FILE "WEMADEIT_monitor_state.dat"
 
 //+------------------------------------------------------------------+
 //| Initialize monitor                                                |
@@ -105,6 +113,13 @@ void MonitorInit()
    g_mon_last_sl_hit = 0;
    g_mon_initial_balance = AccountInfoDouble(ACCOUNT_BALANCE);
    g_mon_peak_balance = g_mon_initial_balance;
+   g_mon_last_heartbeat = 0;
+   g_mon_start_time = (int)TimeCurrent();
+   g_mon_last_summary_day = 0;
+   g_mon_label_refresh = 0;
+   g_mon_trade_count_total = 0;
+
+   MonitorLoadState();
 
    MonitorLog(MON_SEV_INFO, "INIT", "GoldMonitor initialized. Balance: " +
       DoubleToString(g_mon_initial_balance, 2));
@@ -124,12 +139,24 @@ void MonitorInitTelegram(string token, string chat_id)
 //+------------------------------------------------------------------+
 //| Structured logging with severity + tag                             |
 //+------------------------------------------------------------------+
+bool MonitorIsDuplicate(string tag, string msg)
+{
+   int count = 0;
+   for(int i = g_mon_log_count - 1; i >= 0 && count < 5; i--, count++) {
+      if(g_mon_log[i].tag == tag && g_mon_log[i].message == msg)
+         return true;
+   }
+   return false;
+}
+
 void MonitorLog(ENUM_MONITOR_SEVERITY sev, string tag, string msg, double val = 0)
 {
    string sev_str = "INFO";
    if(sev == MON_SEV_WARN) sev_str = "WARN";
    else if(sev == MON_SEV_ERROR) sev_str = "ERROR";
    else if(sev == MON_SEV_CRITICAL) sev_str = "CRIT";
+
+   if(MonitorIsDuplicate(tag, msg)) return;
 
    Print(MonHeader(sev_str, tag) + msg + (val != 0 ? " | val=" + DoubleToString(val, 4) : ""));
 
@@ -201,6 +228,10 @@ void MonitorTrackSignal(string signal_name, bool win, double pnl, double rr)
 
    MonitorLog(MON_SEV_INFO, "SIGNAL", signal_name + " | " + (win ? "WIN" : "LOSS") +
       " | PnL=" + DoubleToString(pnl, 2) + " | RR=" + DoubleToString(rr, 2));
+
+   g_mon_trade_count_total++;
+   if(g_mon_trade_count_total % 100 == 0)
+      MonitorReevaluateSignals();
 }
 
 //+------------------------------------------------------------------+
@@ -258,6 +289,26 @@ void MonitorCheckConnection()
    } else {
       g_mon_conn.consecutive_wide = 0;
    }
+}
+
+//+------------------------------------------------------------------+
+//| Re-evaluate all signals — called every 100 trades                 |
+//+------------------------------------------------------------------+
+void MonitorReevaluateSignals()
+{
+   int re_disabled = 0;
+   for(int i = 0; i < g_mon_signal_count; i++) {
+      if(g_mon_signals[i].total >= 15 && g_mon_signals[i].win_rate < 0.30 && !g_mon_signals[i].auto_disabled) {
+         g_mon_signals[i].auto_disabled = true;
+         MonitorLog(MON_SEV_WARN, "SIGNAL", "Auto-disabled \"" + g_mon_signals[i].name +
+            "\" — WR " + DoubleToString(g_mon_signals[i].win_rate * 100, 1) +
+            "% after " + IntegerToString(g_mon_signals[i].total) + " trades");
+         re_disabled++;
+      }
+   }
+   if(re_disabled > 0)
+      MonitorLog(MON_SEV_INFO, "SIGNAL", "Re-evaluation complete — disabled " +
+         IntegerToString(re_disabled) + " signals");
 }
 
 //+------------------------------------------------------------------+
@@ -347,6 +398,42 @@ void MonitorPeriodicCheck(int ea_magic, string ea_symbol)
       MonitorLog(MON_SEV_CRITICAL, "BROKER", IntegerToString(g_mon_failed_trades) +
          " consecutive trade failures — possible broker issue");
    }
+
+   // 8. Heartbeat every 30 minutes
+   if(now - g_mon_last_heartbeat >= 1800) {
+      g_mon_last_heartbeat = now;
+      if(g_telegram.IsReady()) {
+         int uptime = (int)((now - g_mon_start_time) / 3600);
+         double dd = (g_mon_peak_balance > 0)
+            ? (g_mon_peak_balance - equity) / g_mon_peak_balance * 100.0 : 0;
+         double daily = balance - g_mon_initial_balance;
+         int pos = PositionsTotal();
+         g_telegram.SendHeartbeat("1.01", uptime, pos, balance, daily, dd);
+      }
+   }
+
+   // 9. Daily summary at day rollover
+   MqlDateTime dt_now;
+   TimeToStruct(now, dt_now);
+   int today = dt_now.day_of_year;
+   if(today != g_mon_last_summary_day && g_mon_last_summary_day != 0) {
+      g_mon_last_summary_day = today;
+      if(g_telegram.IsReady()) {
+         double daily_pnl = balance - g_mon_initial_balance;
+         double dd = (g_mon_peak_balance > 0)
+            ? (g_mon_peak_balance - equity) / g_mon_peak_balance * 100.0 : 0;
+         int total_trades = 0;
+         for(int i = 0; i < g_mon_signal_count; i++)
+            total_trades += g_mon_signals[i].total;
+         g_telegram.SendSummary(balance, equity, total_trades, daily_pnl, dd,
+            g_mon_signal_count, MonitorGetDisabledSignals());
+      }
+   } else if(g_mon_last_summary_day == 0) {
+      g_mon_last_summary_day = today;
+   }
+
+   // 10. Persist state every check
+   MonitorSaveState();
 }
 
 //+------------------------------------------------------------------+
@@ -546,6 +633,69 @@ string MonitorGetDisabledSignals()
 }
 
 //+------------------------------------------------------------------+
+//| Save persistent state to file                                      |
+//+------------------------------------------------------------------+
+void MonitorSaveState()
+{
+   int handle = FileOpen(MON_STATE_FILE, FILE_WRITE|FILE_BIN|FILE_COMMON);
+   if(handle == INVALID_HANDLE) return;
+
+   // Write peak balance, signal count, and signal stats
+   FileWriteDouble(handle, g_mon_peak_balance);
+   FileWriteDouble(handle, g_mon_initial_balance);
+   FileWriteInteger(handle, g_mon_signal_count);
+   FileWriteInteger(handle, g_mon_trade_count_total);
+   FileWriteInteger(handle, g_mon_start_time);
+
+   for(int i = 0; i < g_mon_signal_count; i++) {
+      FileWriteString(handle, g_mon_signals[i].name + "\n");
+      FileWriteInteger(handle, g_mon_signals[i].total);
+      FileWriteInteger(handle, g_mon_signals[i].wins);
+      FileWriteInteger(handle, g_mon_signals[i].losses);
+      FileWriteDouble(handle, g_mon_signals[i].total_pnl);
+      FileWriteDouble(handle, g_mon_signals[i].avg_rr);
+      FileWriteInteger(handle, (int)g_mon_signals[i].auto_disabled);
+   }
+
+   FileClose(handle);
+}
+
+//+------------------------------------------------------------------+
+//| Load persistent state from file                                    |
+//+------------------------------------------------------------------+
+void MonitorLoadState()
+{
+   int handle = FileOpen(MON_STATE_FILE, FILE_READ|FILE_BIN|FILE_COMMON);
+   if(handle == INVALID_HANDLE) return;
+
+   g_mon_peak_balance = FileReadDouble(handle);
+   g_mon_initial_balance = FileReadDouble(handle);
+   int saved_count = FileReadInteger(handle);
+   g_mon_trade_count_total = FileReadInteger(handle);
+   g_mon_start_time = FileReadInteger(handle);
+
+   for(int i = 0; i < saved_count && i < 20; i++) {
+      g_mon_signals[i].name = FileReadString(handle, 64);
+      StringReplace(g_mon_signals[i].name, "\n", "");
+      g_mon_signals[i].total = FileReadInteger(handle);
+      g_mon_signals[i].wins = FileReadInteger(handle);
+      g_mon_signals[i].losses = FileReadInteger(handle);
+      g_mon_signals[i].total_pnl = FileReadDouble(handle);
+      g_mon_signals[i].avg_rr = FileReadDouble(handle);
+      g_mon_signals[i].auto_disabled = (bool)FileReadInteger(handle);
+      g_mon_signals[i].last_updated = 0;
+      g_mon_signals[i].win_rate = (g_mon_signals[i].total > 0)
+         ? (double)g_mon_signals[i].wins / g_mon_signals[i].total : 0;
+      g_mon_signals[i].max_drawdown_hit = 0;
+   }
+   g_mon_signal_count = saved_count;
+
+   FileClose(handle);
+   Print(MonHeader("INFO", "STATE") + "Restored " + IntegerToString(saved_count) +
+      " signal stats from persistent state");
+}
+
+//+------------------------------------------------------------------+
 //| Reset monitor state (call on new day / config change)             |
 //+------------------------------------------------------------------+
 void MonitorResetDaily()
@@ -613,4 +763,42 @@ void MonitorSendDailySummary(int trades_today, double daily_pnl, string disabled
    double dd = (g_mon_peak_balance > 0)
       ? (g_mon_peak_balance - eq) / g_mon_peak_balance * 100.0 : 0;
    g_telegram.SendSummary(bal, eq, trades_today, daily_pnl, dd, g_mon_signal_count, disabled);
+}
+
+//+------------------------------------------------------------------+
+//| Draw on-chart label with account + signal state                    |
+//+------------------------------------------------------------------+
+void MonitorDrawLabel()
+{
+   if(!g_mon_initialized) return;
+
+   string label = "WEMADEIT Monitor\n";
+   label += "Bal: $" + DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 2) + "\n";
+   label += "Eq: $" + DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY), 2) + "\n";
+
+   double dd = (g_mon_peak_balance > 0)
+      ? (g_mon_peak_balance - AccountInfoDouble(ACCOUNT_EQUITY)) / g_mon_peak_balance * 100.0 : 0;
+   label += "DD: " + DoubleToString(dd, 1) + "%\n";
+   label += "Trades: " + IntegerToString(g_mon_trade_count_total) + "\n";
+   label += "Signals: " + IntegerToString(g_mon_signal_count) + " tracked\n";
+
+   int disabled = 0;
+   for(int i = 0; i < g_mon_signal_count; i++)
+      if(g_mon_signals[i].auto_disabled) disabled++;
+   if(disabled > 0) label += IntegerToString(disabled) + " disabled\n";
+
+   string dis = MonitorGetDisabledSignals();
+   if(dis != "") label += "OFF: " + dis;
+
+   string obj_name = "Monitor_Label";
+   ObjectDelete(0, obj_name);
+   ObjectCreate(0, obj_name, OBJ_LABEL, 0, 0, 0);
+   ObjectSetString(0, obj_name, OBJPROP_TEXT, label);
+   ObjectSetInteger(0, obj_name, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+   ObjectSetInteger(0, obj_name, OBJPROP_XDISTANCE, 5);
+   ObjectSetInteger(0, obj_name, OBJPROP_YDISTANCE, 5);
+   ObjectSetInteger(0, obj_name, OBJPROP_COLOR, clrWhite);
+   ObjectSetInteger(0, obj_name, OBJPROP_FONTSIZE, 8);
+   ObjectSetInteger(0, obj_name, OBJPROP_BACK, false);
+   ObjectSetInteger(0, obj_name, OBJPROP_SELECTABLE, false);
 }

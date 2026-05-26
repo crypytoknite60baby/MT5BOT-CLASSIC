@@ -1,0 +1,30 @@
+name: Compile MQL5
+
+on:
+  push:
+    branches: [ main, dev ]
+    paths:
+      - "*.mq5"
+      - "*.mqh"
+  pull_request:
+    branches: [ main ]
+    paths:
+      - "*.mq5"
+      "*.mqh"
+
+jobs:
+  compile:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target:
+          - WEMADEIT_dev.mq5
+          - WEMADEIT_Watcher.mq5
+          - new_strategy.mq5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compile ${{ matrix.target }}
+        uses: fx31337/mql-compile-action@v2
+        with:
+          file: ${{ matrix.target }}
