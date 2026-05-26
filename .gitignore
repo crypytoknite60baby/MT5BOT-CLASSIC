@@ -1,0 +1,30 @@
+# Archived/legacy files
+archive/
+Enhanced_Smart_Money_Trader_Fixed.mq5
+Enhanced_Smart_Money_Trader_v5.0.mq5
+Enhanced_Smart_Money_Trader_v6.0.mq5
+Enhanced_Smart_Money_Trader_v6.0/
+Enhanced_Smart_Money_Trader_v7.0.mq5
+Enhanced_Smart_Money_Trader_v7.0_temp.mq5
+
+# Backups and duplicates
+"WEMADEIT.mq5 2"
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+
+# Logs
+logs/*.csv
+logs/weekly/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# MetaTrader
+*.ex5
+*.ex4
+*.tst

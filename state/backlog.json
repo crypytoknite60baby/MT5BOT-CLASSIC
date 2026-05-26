@@ -1,0 +1,25 @@
+{
+  "project": "THE NEW BOT",
+  "canonical_ea": "WEMADEIT.mq5",
+  "dev_ea": "WEMADEIT_dev.mq5",
+  "phase": "A",
+  "weeks_completed": 0,
+  "current_item_id": "A1",
+  "items": [
+    { "id": "A1", "title": "Single canonical EA + archive/ folder", "phase": "A" },
+    { "id": "A2", "title": "Centralize magic number / symbol validation in OnInit", "phase": "A" },
+    { "id": "A3", "title": "Fix spread/session throttles from Journal data", "phase": "A" },
+    { "id": "A4", "title": "Structured logging [WEMADEIT|ENTRY|EXIT|RISK]", "phase": "A" },
+    { "id": "B5", "title": "ProfitMaximizer multi-stage trailing only", "phase": "B" },
+    { "id": "B6", "title": "Verify session max trades enforcement", "phase": "B" },
+    { "id": "B7", "title": "Stagnant trade exit from ProfitMaximizer", "phase": "B" },
+    { "id": "B8", "title": "Adaptive lots with confidence score", "phase": "B" },
+    { "id": "C9", "title": "Load ONNX in canonical EA", "phase": "C" },
+    { "id": "C10", "title": "Regime-based RR/trail/block RANGING", "phase": "C" },
+    { "id": "C11", "title": "Automate bi-weekly retrain checklist", "phase": "C" },
+    { "id": "C12", "title": "Python/MQL5 feature parity num_features", "phase": "C" },
+    { "id": "D13", "title": "Merge one feature from new_strategy.mq5", "phase": "D" },
+    { "id": "D14", "title": "HTF bias A/B on demo", "phase": "D" },
+    { "id": "D15", "title": "Pump catcher tuning from METRICS", "phase": "D" }
+  ]
+}

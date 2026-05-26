@@ -1,0 +1,60 @@
+{
+  "_comment": "GoldMonitor & WEMADEIT_Watcher tuning thresholds",
+
+  "telegram": {
+    "bot_token": "8908559475:AAEFd7Ii5hpJerpHD626o1ETdVgLNSK3cCA",
+    "chat_id": "688755863",
+    "notify_on": ["entry", "exit", "error", "critical", "drawdown", "daily_summary"],
+    "rate_limit_per_min": 18
+  },
+
+  "connection": {
+    "spread_threshold_points": 80,
+    "spread_anomaly_multiplier": 3.0,
+    "slippage_alert_points": 50,
+    "max_consecutive_wide_spread": 3,
+    "off_quote_backoff_seconds": 60
+  },
+
+  "risk": {
+    "max_daily_loss_pct": 5.0,
+    "drawdown_warn_pct": 7.0,
+    "drawdown_critical_pct": 12.0,
+    "critical_margin_level_pct": 200,
+    "margin_warn_pct": 500,
+    "free_margin_critical": 50,
+    "stale_position_hours": 48
+  },
+
+  "signals": {
+    "auto_disable_min_trades": 15,
+    "auto_disable_win_rate_below": 0.30,
+    "max_signal_name_len": 20
+  },
+
+  "trading": {
+    "max_positions_before_alert": 5,
+    "stale_pending_hours": 6,
+    "cooldown_hours_after_two_losses": 4,
+    "consecutive_failures_critical": 3
+  },
+
+  "logging": {
+    "max_log_entries": 500,
+    "max_alerts_watcher": 200,
+    "check_interval_seconds": 300,
+    "watcher_scan_interval_seconds": 10,
+    "structed_tags": true,
+    "output_file": "gold_monitor_log.csv"
+  },
+
+  "gold_specific": {
+    "use_utc_sessions": true,
+    "london_ny_overlap_utc_start": 13,
+    "london_ny_overlap_utc_end": 16,
+    "skip_npf": true,
+    "skip_fomc": true,
+    "max_swap_per_lot": 15.0,
+    "wednesday_triple_warn": true
+  }
+}

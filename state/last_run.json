@@ -1,0 +1,8 @@
+{
+  "last_job": null,
+  "last_run_at": null,
+  "last_item_id": null,
+  "summary": "No Hermes cron runs recorded yet.",
+  "compile_pending": false,
+  "blockers": ["Start Hermes gateway: hermes gateway install && hermes gateway start"]
+}
